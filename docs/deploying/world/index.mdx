@@ -1,0 +1,39 @@
+---
+title: Worlds
+---
+
+import { Callout } from '@/components/ui/callout'
+
+# The World Interface
+
+<Callout type="wip">
+
+This page is a work in progress.
+
+</Callout>
+
+The workflow `World` is an interface that abstracts how workflows and steps communicate with the outside world, letting you build custom adapters and reuse them across different environments, infrastructure, and hosting providers.
+
+## Choosing a World implementation
+
+* By default, Workflow uses the [Local world](/docs/deploying/world/embedded-world) for easy local development.
+* When deployed on Vercel, Workflow switches to the [Vercel world](/docs/deploying/world/vercel-world).
+
+If you want to use a different World implementation, set the `WORKFLOW_TARGET_WORLD` environment variable to your desired World package's NPM name:
+
+```bash
+export WORKFLOW_TARGET_WORLD=@my-namespace/my-npm-package
+export MY_WORLD_CONFIG=... # implementation-specific configuration
+```
+
+## Built-in Worlds
+
+Workflow DevKit provides two built-in world implementations:
+
+- [Embedded World](/docs/deploying/world/embedded-world) - Filesystem-based for local development
+- [Vercel World](/docs/deploying/world/vercel-world) - Production-ready for Vercel deployments
+
+## Community Worlds
+
+- [Postgres World](/docs/deploying/world/postgres-world) - Reference implementation for a multi-host PostgreSQL backend world.
+- [Jazz World](https://github.com/garden-co/workflow-world-jazz) - A full World implementation built on top of [Jazz](https://jazz.tools)

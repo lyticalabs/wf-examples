@@ -1,0 +1,13 @@
+{
+  "pages": [
+    "introduction",
+    "---",
+    "getting-started",
+    "foundations",
+    "how-it-works",
+    "observability",
+    "deploying",
+    "errors",
+    "api-reference"
+  ]
+}

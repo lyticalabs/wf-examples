@@ -1,0 +1,25 @@
+---
+title: "@workflow/ai"
+icon: FlaskConical
+---
+
+import { ExperimentalPackageCallout } from "@/components/experimental-package-callout"
+
+# `@workflow/ai`
+
+<ExperimentalPackageCallout packageName="@workflow/ai" />
+
+Helpers for integrating AI SDK for building AI-powered workflows.
+
+---
+
+## Classes
+
+<Cards>
+    <Card title="DurableAgent" href="/docs/api-reference/workflow-ai/durable-agent">
+      A class for building durable AI agents that maintain state across workflow steps and handle tool execution with automatic retries.
+    </Card>
+    <Card title="WorkflowChatTransport" href="/docs/api-reference/workflow-ai/workflow-chat-transport">
+      A drop-in transport for the AI SDK for automatic reconnection in interrupted streams.
+    </Card>
+</Cards>
