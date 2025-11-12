@@ -20,7 +20,7 @@ export async function chat(messages: UIMessage[]) {
 	const writable = getWritable<UIMessageChunk>();
 
 	const agent = new DurableAgent({
-		model: "gpt-4o",
+		model: "gpt-5-mini",
 		system: `You are a helpful assistant. Check your knowledge base before answering any questions.
     Only respond to questions using information from tool calls.
     if no relevant information is found in the tool calls, respond, "Sorry, I don't know."`,
@@ -48,6 +48,7 @@ export async function chat(messages: UIMessage[]) {
 					console.log("Executing getInformation tool");
 					const result = await findRelevant(question);
 					console.log(`Found relevant information: ${result.length}`);
+          console.log(result);
 					return result;
 				},
 			},

@@ -1,0 +1,831 @@
+# AI SDK v5 + Next.js 16 + React 19.2 + AI Elements
+
+You MUST follow these rules when working with AI SDK v5, Next.js 16, React 19.2, and AI-powered UI elements.
+
+## Core Architecture: Content-First Protocol
+
+AI SDK v5 implements a content-first protocol where every model output is a typed content part in an ordered stream.
+
+### Message Type Dichotomy
+
+You MUST understand and maintain the separation between UIMessage and ModelMessage:
+
+- **UIMessage**: Source of truth for application state. ALWAYS save to database in this format.
+- **ModelMessage**: Streamlined format optimized for LLM communication.
+
+❌ **DO NOT** send UIMessage directly to model:
+```typescript
+// WRONG - Will cause errors
+const result = await streamText({
+  model: openai('gpt-4o'),
+  messages: uiMessages, // UIMessage[] sent to model
+});
+```
+
+✅ **MUST** convert UIMessage to ModelMessage before API calls:
+```typescript
+// CORRECT
+import { streamText, convertToModelMessages } from 'ai';
+import type { UIMessage } from 'ai';
+
+const result = await streamText({
+  model: openai('gpt-4o'),
+  messages: convertToModelMessages(uiMessages),
+});
+```
+
+## API Route Implementation
+
+### Server-Side Pattern
+
+You MUST implement API routes using these patterns:
+
+✅ **CORRECT** Next.js 16 + AI SDK v5 API route:
+```typescript
+// app/api/chat/route.ts
+import { streamText, convertToModelMessages } from 'ai';
+import { openai } from '@ai-sdk/openai';
+import type { UIMessage } from 'ai';
+
+export async function POST(req: Request) {
+  const { messages }: { messages: UIMessage[] } = await req.json();
+
+  const result = await streamText({
+    model: openai('gpt-4o'),
+    messages: convertToModelMessages(messages),
+    providerOptions: {
+      // Provider-specific options (renamed from providerMetadata)
+    },
+  });
+
+  return result.toUIMessageStreamResponse();
+}
+```
+
+❌ **DO NOT** use v4 patterns:
+```typescript
+// WRONG - v4 pattern
+import { OpenAIStream, StreamingTextResponse } from 'ai';
+
+export async function POST(req: Request) {
+  const stream = OpenAIStream(response);
+  return new StreamingTextResponse(stream);
+}
+```
+
+### Required Exports
+
+You MUST return responses using:
+- `result.toUIMessageStreamResponse()` for chat endpoints
+- Server-Sent Events (SSE) as the streaming protocol
+
+❌ **DO NOT** use StreamingTextResponse or custom streaming implementations.
+
+## Client-Side Implementation
+
+### useChat Hook
+
+You MUST use the redesigned useChat hook with type safety:
+
+✅ **CORRECT** client implementation:
+```typescript
+'use client';
+
+import { useChat } from '@ai-sdk/react';
+import type { UIMessage } from 'ai';
+
+export function Chat() {
+  const { messages, input, handleInputChange, handleSubmit, status } = 
+    useChat<UIMessage>({
+      api: '/api/chat',
+    });
+
+  return (
+    <div>
+      {messages.map((message) => (
+        <MessageBubble key={message.id} message={message} />
+      ))}
+      <form onSubmit={handleSubmit}>
+        <input
+          value={input}
+          onChange={handleInputChange}
+          disabled={status !== 'ready'}
+        />
+        <button type="submit" disabled={status !== 'ready'}>
+          Send
+        </button>
+      </form>
+    </div>
+  );
+}
+```
+
+### Message Rendering
+
+You MUST iterate through `message.parts` array to render messages:
+
+✅ **CORRECT** message rendering:
+```typescript
+function MessageBubble({ message }: { message: UIMessage }) {
+  return (
+    <div className={`message-${message.role}`}>
+      {message.parts.map((part, index) => {
+        switch (part.type) {
+          case 'text':
+            return <p key={index}>{part.text}</p>;
+          
+          case 'tool-call':
+            return (
+              <div key={index}>
+                Calling: {part.toolName}
+                <pre>{JSON.stringify(part.input, null, 2)}</pre>
+              </div>
+            );
+          
+          case 'tool-result':
+            return (
+              <div key={index}>
+                Result: <pre>{JSON.stringify(part.output, null, 2)}</pre>
+              </div>
+            );
+          
+          default:
+            return null;
+        }
+      })}
+    </div>
+  );
+}
+```
+
+❌ **DO NOT** treat message content as a simple string:
+```typescript
+// WRONG - v4 pattern
+<div>{message.content}</div>
+```
+
+## Tool Definitions
+
+### Schema Structure
+
+You MUST use `inputSchema` and `outputSchema` (not `parameters`):
+
+✅ **CORRECT** tool definition:
+```typescript
+import { tool } from 'ai';
+import { z } from 'zod';
+
+const weatherTool = tool({
+  description: 'Get weather for a location',
+  inputSchema: z.object({
+    city: z.string().describe('City name'),
+  }),
+  outputSchema: z.object({
+    temperature: z.number(),
+    conditions: z.enum(['sunny', 'cloudy', 'rainy']),
+  }),
+  execute: async ({ city }) => {
+    // Implementation
+    return { temperature: 72, conditions: 'sunny' };
+  },
+});
+```
+
+❌ **DO NOT** use v4 `parameters` field:
+```typescript
+// WRONG
+const tool = {
+  parameters: z.object({ city: z.string() }),
+};
+```
+
+### Tool Call Properties
+
+In v5, tool properties are renamed:
+- Tool arguments are in `part.input` (not `part.arguments`)
+- Tool results are in `part.output` (not `part.result`)
+
+## Custom Data Parts
+
+### Replacing StreamData
+
+❌ **NEVER** use the removed StreamData class:
+```typescript
+// WRONG - Removed in v5
+import { StreamData } from 'ai';
+const data = new StreamData();
+data.append({ status: 'Processing...' });
+```
+
+✅ **MUST** use typed custom data parts:
+```typescript
+import { createUIMessageStream } from 'ai';
+import { z } from 'zod';
+
+// 1. Define schema
+const statusSchema = z.object({
+  message: z.string(),
+  progress: z.number().optional(),
+});
+
+// 2. Define custom message type
+type AppMessage = UIMessage<{
+  data: {
+    'status-update': z.infer<typeof statusSchema>;
+  };
+}>;
+
+// 3. Use in API route
+export async function POST(req: Request) {
+  const stream = createUIMessageStream({
+    messageSchema: {} as AppMessage,
+    execute: async ({ writer }) => {
+      writer.write({
+        type: 'data-status-update',
+        data: { message: 'Processing...', progress: 50 },
+      });
+      
+      // Continue with model stream
+      const result = await streamText({ /* ... */ });
+      writer.merge(result.toUIMessageStream());
+    },
+  });
+
+  return stream.toUIMessageStreamResponse();
+}
+```
+
+### Transient Data Parts
+
+For ephemeral UI updates that should NOT be saved to history:
+
+```typescript
+writer.write({
+  type: 'data-status',
+  data: { message: 'Thinking...' },
+  transient: true, // Will not be added to messages array
+});
+```
+
+## React 19.2 Patterns
+
+### Server Actions
+
+You MUST use React 19.2 server actions with proper error handling:
+
+✅ **CORRECT** server action pattern:
+```typescript
+'use server';
+
+import { revalidatePath } from 'next/cache';
+
+export async function updateData(formData: FormData) {
+  const name = formData.get('name');
+  
+  // Validation
+  if (!name) {
+    return { success: false, error: 'Name required' };
+  }
+  
+  // Database operation
+  await db.update({ name });
+  
+  // Revalidate
+  revalidatePath('/dashboard');
+  
+  return { success: true };
+}
+```
+
+### useActionState Hook
+
+For form submissions with server actions:
+
+```typescript
+'use client';
+
+import { useActionState } from 'react';
+import { updateName } from './actions';
+
+export function NameForm() {
+  const [state, submitAction] = useActionState(updateName, null);
+
+  return (
+    <form action={submitAction}>
+      <input name="name" />
+      <button type="submit">Update</button>
+      {state?.error && <p>{state.error}</p>}
+    </form>
+  );
+}
+```
+
+### useTransition for Async Updates
+
+You MUST use useTransition for async state updates:
+
+✅ **CORRECT** transition pattern:
+```typescript
+'use client';
+
+import { useTransition } from 'react';
+
+export function LikeButton() {
+  const [isPending, startTransition] = useTransition();
+  const [count, setCount] = useState(0);
+
+  const onClick = () => {
+    startTransition(async () => {
+      const newCount = await incrementLike();
+      setCount(newCount);
+    });
+  };
+
+  return (
+    <button onClick={onClick} disabled={isPending}>
+      Like ({count}) {isPending && '...'}
+    </button>
+  );
+}
+```
+
+❌ **DO NOT** await before startTransition:
+```typescript
+// WRONG
+startTransition(async () => {
+  await someAsync(); // Do NOT await here
+  startTransition(() => { // Do NOT nest
+    setState(value);
+  });
+});
+```
+
+### Suspense Boundaries
+
+You MUST wrap async server components in Suspense:
+
+```typescript
+import { Suspense } from 'react';
+
+async function DataComponent() {
+  const data = await fetchData();
+  return <div>{data}</div>;
+}
+
+export default function Page() {
+  return (
+    <Suspense fallback={<div>Loading...</div>}>
+      <DataComponent />
+    </Suspense>
+  );
+}
+```
+
+## End-to-End Type Safety
+
+### Custom Message Types
+
+You MUST define and use custom message types across your stack:
+
+1. **Define schemas**:
+```typescript
+// lib/schemas.ts
+import { z } from 'zod';
+
+export const flightSchema = z.object({
+  flightNumber: z.string(),
+  departure: z.string(),
+});
+```
+
+2. **Create custom type**:
+```typescript
+// lib/types.ts
+import type { UIMessage } from 'ai';
+import { z } from 'zod';
+import { flightSchema } from './schemas';
+
+export type AppMessage = UIMessage<{
+  tool: {
+    getFlightInfo: {
+      input: z.infer<typeof flightSchema>;
+    };
+  };
+}>;
+```
+
+3. **Use on server**:
+```typescript
+// app/api/chat/route.ts
+import { createUIMessageStream } from 'ai';
+import { AppMessage } from '@/lib/types';
+
+const stream = createUIMessageStream<AppMessage>({
+  messageSchema: {} as AppMessage,
+  execute: async ({ writer }) => {
+    // Writer is now type-safe
+  },
+});
+```
+
+4. **Use on client**:
+```typescript
+// components/chat.tsx
+'use client';
+import { useChat } from '@ai-sdk/react';
+import { AppMessage } from '@/lib/types';
+
+const { messages } = useChat<AppMessage>({
+  api: '/api/chat',
+});
+// messages is now AppMessage[]
+```
+
+## Metadata and Token Usage
+
+### Accessing Token Usage
+
+❌ **DO NOT** access usage from onFinish options (v4 pattern):
+```typescript
+// WRONG
+useChat({
+  onFinish: (message, options) => {
+    console.log(options.usage); // Does not exist in v5
+  },
+});
+```
+
+✅ **MUST** access usage from message metadata:
+```typescript
+// CORRECT
+useChat({
+  onFinish: (message) => {
+    if (message.role === 'assistant' && message.metadata?.usage) {
+      console.log('Tokens:', message.metadata.usage);
+    }
+  },
+});
+```
+
+## Authentication with Clerk
+
+### Middleware Protection
+
+You MUST protect API routes using Clerk middleware:
+
+```typescript
+// middleware.ts
+import { clerkMiddleware, createRouteMatcher } from '@clerk/nextjs/server';
+
+const isChatApiRoute = createRouteMatcher(['/api/chat(.*)']);
+
+export default clerkMiddleware((auth, req) => {
+  if (isChatApiRoute(req)) {
+    auth().protect();
+  }
+});
+
+export const config = {
+  matcher: [
+    '/((?!_next|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)',
+    '/(api|trpc)(.*)',
+  ],
+};
+```
+
+### Accessing User Context
+
+```typescript
+// app/api/chat/route.ts
+import { auth } from '@clerk/nextjs/server';
+
+export async function POST(req: Request) {
+  const { userId } = auth();
+  
+  if (!userId) {
+    return new Response('Unauthorized', { status: 401 });
+  }
+  
+  // Use userId for database operations
+}
+```
+
+## Database Persistence (Drizzle + Neon)
+
+### Schema Design
+
+You MUST use a flattened parts table for storing UIMessage data:
+
+✅ **CORRECT** Drizzle schema:
+```typescript
+// db/schema.ts
+import { pgTable, uuid, text, timestamp, varchar, integer, json } from 'drizzle-orm/pg-core';
+
+export const chats = pgTable('chats', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: text('user_id').notNull(),
+  title: text('title').notNull(),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+});
+
+export const messages = pgTable('messages', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  chatId: uuid('chat_id').notNull().references(() => chats.id),
+  role: varchar('role', { enum: ['user', 'assistant', 'system', 'tool'] }).notNull(),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+});
+
+export const parts = pgTable('parts', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  messageId: uuid('message_id').notNull().references(() => messages.id),
+  order: integer('order').notNull(),
+  
+  // Prefix-based columns for different part types
+  text_value: text('text_value'),
+  
+  // Tool columns (per tool name)
+  tool_getWeather_input: json('tool_getWeather_input'),
+  tool_getWeather_output: json('tool_getWeather_output'),
+  
+  // Custom data part columns
+  data_status_message: text('data_status_message'),
+});
+```
+
+❌ **DO NOT** store parts as a single JSONB column - this breaks type safety and query performance.
+
+### Migration Automation
+
+You MUST automate migrations in your build process:
+
+```json
+// package.json
+{
+  "scripts": {
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "tsx db/migrate.ts",
+    "build": "pnpm db:migrate && next build"
+  }
+}
+```
+
+## Advanced Patterns
+
+### Agentic Loop Control
+
+Use `stopWhen` and `prepareStep` for multi-step agents:
+
+```typescript
+import { streamText, hasToolCall, stepCountIs } from 'ai';
+
+const result = await streamText({
+  model: openai('gpt-4o'),
+  messages: convertToModelMessages(messages),
+  tools: { searchTool, answerTool },
+  
+  // Stop when final answer is generated
+  stopWhen: hasToolCall('answerTool'),
+  
+  // Modify context before each step
+  prepareStep: async ({ messages, step }) => {
+    if (step > 3) {
+      // Add reminder after 3 steps
+      return {
+        messages: [
+          { role: 'system', content: 'Please finalize your answer.' },
+          ...messages,
+        ],
+      };
+    }
+    return { messages };
+  },
+});
+```
+
+### Generative UI with Status Updates
+
+Stream typed UI updates alongside model responses:
+
+```typescript
+// Server
+writer.write({
+  type: 'data-loading',
+  data: { step: 'Searching database...' },
+});
+
+const result = await streamText({ /* ... */ });
+writer.merge(result.toUIMessageStream());
+
+writer.write({
+  type: 'data-loading',
+  data: { step: 'Complete' },
+});
+```
+
+```typescript
+// Client
+{message.parts.map((part) => {
+  if (part.type === 'data-loading') {
+    return <LoadingSpinner message={part.data.step} />;
+  }
+  // ... other part types
+})}
+```
+
+## Package Dependencies
+
+You MUST use these exact version constraints:
+
+```json
+{
+  "dependencies": {
+    "ai": "^5.0.0",
+    "@ai-sdk/react": "^2.0.0",
+    "@ai-sdk/openai": "^2.0.0",
+    "zod": "^3.25.0",
+    "next": "^16.0.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  }
+}
+```
+
+❌ **DO NOT** mix v4 and v5 packages - this will cause runtime errors.
+
+## shadcn/ui Integration
+
+When using shadcn components with AI features:
+
+✅ **MUST** create wrapper components that reference ui/ components:
+```typescript
+// components/ai-chat-input.tsx (CORRECT)
+import { Input } from '@/components/ui/input';
+import { Button } from '@/components/ui/button';
+
+export function AIChatInput({ value, onChange, onSubmit, disabled }: Props) {
+  return (
+    <form onSubmit={onSubmit} className="flex gap-2">
+      <Input 
+        value={value}
+        onChange={onChange}
+        disabled={disabled}
+        placeholder="Ask me anything..."
+      />
+      <Button type="submit" disabled={disabled}>
+        Send
+      </Button>
+    </form>
+  );
+}
+```
+
+❌ **NEVER** modify files in `components/ui/` directly - these are shadcn base components.
+
+## Error Handling
+
+### Tool Execution Errors
+
+Handle tool execution failures gracefully:
+
+```typescript
+{message.parts.map((part) => {
+  if (part.type === 'tool-result') {
+    if (part.state === 'output-error') {
+      return (
+        <div className="error">
+          Tool failed: {part.errorText}
+        </div>
+      );
+    }
+    return <ToolResult data={part.output} />;
+  }
+})}
+```
+
+### Streaming Errors
+
+You MUST implement error boundaries for streaming failures:
+
+```typescript
+'use client';
+
+import { useChat } from '@ai-sdk/react';
+
+export function Chat() {
+  const { messages, error } = useChat({
+    api: '/api/chat',
+    onError: (error) => {
+      console.error('Chat error:', error);
+      // Handle error (show toast, etc.)
+    },
+  });
+
+  if (error) {
+    return (
+      <div className="error">
+        <p>An error occurred: {error.message}</p>
+        <button onClick={() => window.location.reload()}>
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  return <div>{/* chat UI */}</div>;
+}
+```
+
+## Testing Requirements
+
+### Message Format Testing
+
+You MUST test UIMessage structure in your tests:
+
+```typescript
+import { describe, it, expect } from '@jest/globals';
+import type { UIMessage } from 'ai';
+
+describe('Message handling', () => {
+  it('should correctly structure UIMessage', () => {
+    const message: UIMessage = {
+      id: 'msg-1',
+      role: 'assistant',
+      parts: [
+        { type: 'text', text: 'Hello' },
+      ],
+      createdAt: new Date(),
+    };
+    
+    expect(message.parts).toHaveLength(1);
+    expect(message.parts[0].type).toBe('text');
+  });
+});
+```
+
+### API Route Testing
+
+Test that your API routes return proper SSE streams:
+
+```typescript
+import { POST } from '@/app/api/chat/route';
+
+it('should return UIMessageStreamResponse', async () => {
+  const req = new Request('http://localhost/api/chat', {
+    method: 'POST',
+    body: JSON.stringify({ messages: [] }),
+  });
+
+  const response = await POST(req);
+  
+  expect(response.headers.get('content-type')).toContain('text/event-stream');
+});
+```
+
+## Debugging
+
+### SSE Stream Inspection
+
+To debug streaming issues:
+1. Open browser DevTools → Network tab
+2. Find the `/api/chat` request
+3. View the EventStream tab to see real-time SSE events
+4. Each event shows: `data: {"type":"text","messageId":"...","value":"..."}`
+
+This transparency is a core v5 feature - use it to diagnose issues.
+
+### Type Errors
+
+If TypeScript errors occur with message types:
+1. Verify all packages are v5+ versions
+2. Ensure `convertToModelMessages` is used before model calls
+3. Check that custom message types are consistently used client/server
+4. Confirm Zod version is ^3.25.0 or higher
+
+---
+
+## Critical Rules Summary
+
+**ALWAYS:**
+- Convert UIMessage to ModelMessage with `convertToModelMessages()` before LLM calls
+- Save database state in UIMessage format (never ModelMessage)
+- Use `inputSchema` and `outputSchema` in tool definitions
+- Iterate through `message.parts` array when rendering
+- Return `result.toUIMessageStreamResponse()` from API routes
+- Use type-safe custom data parts instead of StreamData
+- Protect API routes with Clerk middleware
+- Access token usage from `message.metadata.usage`
+- Use React 19.2 patterns: useActionState, useTransition, Suspense
+- Automate database migrations in build process
+
+**NEVER:**
+- Use v4 patterns: StreamData, StreamingTextResponse, OpenAIStream
+- Send UIMessage directly to model without conversion
+- Use `parameters` field in tools (renamed to `inputSchema`)
+- Modify shadcn components in `components/ui/` directly
+- Mix v4 and v5 package versions
+- Store message parts as single JSONB column
+- Access token usage from onFinish options parameter
+- Skip type definitions for custom tools and data parts
+
+**RESEARCH FIRST:**
+Before implementing any AI SDK feature, verify the pattern in the official v5 documentation. v5 represents a fundamental architectural shift - v4 patterns will not work and will cause runtime errors.

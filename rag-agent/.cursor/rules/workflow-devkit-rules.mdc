@@ -1,0 +1,1540 @@
+---
+alwaysApply: false
+---
+# Workflow DevKit: Definitive AI Agent Rule
+
+**CRITICAL**: Workflow DevKit is a TypeScript framework (released after AI knowledge cutoff) for durable, resumable workflows that survive failures, restarts, and suspensions. Every word in this document is authoritative and verified against official documentation.
+
+---
+
+## 0. FOUNDATIONAL PRINCIPLE: SEPARATION IS ABSOLUTE
+
+The ENTIRE framework is built on ONE architectural principle:
+
+**WORKFLOWS orchestrate. STEPS execute.**
+
+This separation enables durability, resumability, and automatic retries. Violations cause runtime failures.
+
+---
+
+## 1. ARCHITECTURE: WORKFLOWS VS STEPS
+
+### 1.1 Workflow Functions (`"use workflow"`)
+
+**Purpose**: Orchestration ONLY. NO execution.
+
+**Environment**: Sandboxed VM, deterministic, NO Node.js runtime.
+
+**Allowed Operations**:
+- ✅ Control flow: `if/else`, `for`, `while`, `switch`
+- ✅ Promise composition: `Promise.all()`, `Promise.race()`, `async/await`
+- ✅ Calling step functions
+- ✅ Using workflow primitives: `sleep()`, `createHook()`, `createWebhook()`, `fetch()`
+- ✅ Pure JavaScript computations (deterministic)
+- ✅ Callbacks (run in workflow sandbox)
+
+**PROHIBITED Operations**:
+- ❌ Database queries
+- ❌ HTTP requests (except `fetch` from `workflow`)
+- ❌ File system access
+- ❌ Node.js core modules (`fs`, `path`, `crypto`, `http`, etc.)
+- ❌ Most npm packages
+- ❌ Non-deterministic operations (already handled: `Math.random()`, `Date` are seeded)
+
+### 1.2 Step Functions (`"use step"`)
+
+**Purpose**: Execution. ALL side effects happen here.
+
+**Environment**: Full Node.js runtime access.
+
+**Capabilities**:
+- ✅ Database queries
+- ✅ External API calls
+- ✅ File system operations
+- ✅ Any npm package
+- ✅ Process environment variables
+- ✅ Full Node.js API
+
+**Built-in Features**:
+- Automatic retry on failure (default: 3 attempts)
+- Result caching in event log
+- Idempotency support via `getStepMetadata().stepId`
+
+### 1.3 Correct Pattern
+
+```typescript
+// WORKFLOW: Orchestration
+export async function processOrderWorkflow(orderId: string) {
+  "use workflow";  // ← MANDATORY: Must be FIRST statement
+  
+  const order = await fetchOrder(orderId);        // Step call
+  const payment = await chargePayment(order);     // Step call
+  
+  if (payment.success) {
+    await notifyUser(order.userId);               // Step call (conditional)
+  }
+  
+  return { orderId, status: 'completed' };
+}
+
+// STEP: Execution with full Node.js access
+async function fetchOrder(orderId: string) {
+  "use step";  // ← MANDATORY: Must be FIRST statement
+  
+  const db = drizzle(process.env.DATABASE_URL);   // ✅ Database access in step
+  const order = await db.query.orders.findFirst({
+    where: eq(orders.id, orderId)
+  });
+  
+  return order;
+}
+
+// STEP: External API with idempotency
+async function chargePayment(order: Order) {
+  "use step";
+  
+  const { stepId } = getStepMetadata();           // Get unique step ID
+  
+  // ✅ Use stepId as idempotency key
+  const charge = await stripe.charges.create({
+    amount: order.total,
+    currency: 'usd',
+    source: order.paymentToken
+  }, {
+    idempotencyKey: stepId  // Prevents duplicate charges on retry
+  });
+  
+  return { success: true, chargeId: charge.id };
+}
+```
+
+### 1.4 Prohibited Pattern
+
+```typescript
+// ❌ WRONG: Side effects in workflow
+export async function badWorkflow(orderId: string) {
+  "use workflow";
+  
+  // ❌ NEVER: Direct database access in workflow
+  const db = drizzle(process.env.DATABASE_URL);
+  const order = await db.query.orders.findFirst({ where: eq(orders.id, orderId) });
+  
+  // ❌ NEVER: Direct API call in workflow (except workflow.fetch)
+  const response = await fetch('https://api.example.com/data');
+  
+  // ❌ NEVER: File system access in workflow
+  const data = fs.readFileSync('./file.txt', 'utf-8');
+  
+  // ❌ NEVER: Node.js modules in workflow
+  const crypto = require('crypto');
+  const hash = crypto.randomBytes(16);
+  
+  return order;
+}
+```
+
+---
+
+## 2. DIRECTIVES: MANDATORY SYNTAX
+
+### 2.1 Workflow Directive
+
+```typescript
+export async function myWorkflow(input: string) {
+  "use workflow";  // ← MUST be FIRST statement
+  
+  // workflow logic
+}
+```
+
+**Rules**:
+- MUST be the FIRST statement in function body
+- MUST be EXACT string literal: `"use workflow"` or `'use workflow'`
+- NO template literals: `` `use workflow` `` is INVALID
+- NO variables: `const directive = "use workflow"` does NOT work
+- MUST be at function level (not in nested blocks)
+
+### 2.2 Step Directive
+
+```typescript
+async function myStep(data: string) {
+  "use step";  // ← MUST be FIRST statement
+  
+  // step logic with full Node.js access
+}
+```
+
+**Same syntax rules as workflow directive.**
+
+### 2.3 Prohibited Patterns
+
+```typescript
+// ❌ WRONG: Directive not first statement
+export async function badWorkflow() {
+  console.log('starting');
+  "use workflow";  // TOO LATE - must be first
+}
+
+// ❌ WRONG: Template literal
+export async function badWorkflow() {
+  `use workflow`;  // INVALID syntax
+}
+
+// ❌ WRONG: Missing directive
+export async function badWorkflow() {
+  // No directive = regular async function, NOT a workflow
+  await someStep();  // This won't work as expected
+}
+
+// ❌ WRONG: Variable or expression
+const directive = "use workflow";
+export async function badWorkflow() {
+  directive;  // Does nothing
+}
+```
+
+---
+
+## 3. CONFIGURATION: MANDATORY SETUP
+
+### 3.1 Next.js: withWorkflow() Wrapper
+
+**REQUIRED** for all Next.js projects.
+
+```typescript
+// next.config.ts
+import { withWorkflow } from 'workflow/next';
+import type { NextConfig } from 'next';
+
+const nextConfig: NextConfig = {
+  // your config
+};
+
+// ❌ WRONG: Missing wrapper
+// export default nextConfig;
+
+// ✅ CORRECT: Wrapped with withWorkflow
+export default withWorkflow(nextConfig);
+```
+
+**Without `withWorkflow()`**: Directives ignored, workflows fail, compilation errors.
+
+### 3.2 AI SDK Integration: Global fetch Override
+
+When using AI SDK (`generateText`, `generateObject`, `streamText`, etc.) inside workflows:
+
+```typescript
+import { fetch } from 'workflow';  // ← REQUIRED IMPORT
+import { generateText } from 'ai';
+import { openai } from '@ai-sdk/openai';
+
+export async function aiWorkflow(prompt: string) {
+  "use workflow";
+  
+  // ✅ CRITICAL: Override BEFORE any AI SDK calls
+  globalThis.fetch = fetch;
+  
+  // Now AI SDK calls are tracked as workflow steps
+  const { text } = await generateText({
+    model: openai('gpt-4o'),
+    prompt: prompt
+  });
+  
+  return text;
+}
+```
+
+**Why Critical**: AI SDK uses `globalThis.fetch` internally. Without override:
+- AI calls NOT recorded as workflow steps
+- Lose durability and resumability
+- No observability for AI operations
+- Workflow cannot survive restarts during AI calls
+
+❌ **Wrong**: Forgetting the override
+
+```typescript
+export async function badAIWorkflow(prompt: string) {
+  "use workflow";
+  
+  // ❌ Missing globalThis.fetch = fetch
+  // AI calls won't be tracked - durability lost!
+  const { text } = await generateText({ model, prompt });
+}
+```
+
+---
+
+## 4. SERIALIZATION: DATA CROSSING BOUNDARIES
+
+ALL data passed between workflows and steps MUST be serializable.
+
+### 4.1 Serializable Types
+
+**Standard JSON** (always safe):
+- `string`, `number`, `boolean`, `null`, `undefined`
+- Plain arrays: `string[]`, `number[]`, `Array<{ id: string }>`
+- Plain objects: `{ key: string, value: number }`
+
+**Extended Support** (special handling):
+- `Date`, `RegExp`, `URL`, `URLSearchParams`
+- `Map<Serializable, Serializable>`, `Set<Serializable>`
+- `bigint`
+- `ArrayBuffer`, Typed Arrays (`Uint8Array`, `Int32Array`, etc.)
+- `Headers`
+- `Request`, `Response` (with special `.json()/.text()` handling)
+- `ReadableStream<Serializable>`, `WritableStream<Serializable>` (as opaque handles only)
+
+### 4.2 Non-Serializable (PROHIBITED)
+
+```typescript
+// ❌ NEVER pass these between workflow and steps:
+// - Functions
+// - Class instances
+// - Circular references
+// - File handles
+// - Socket connections
+// - Database connection objects
+// - WeakMap, WeakSet
+// - Symbol
+// - Promise (pass awaited values instead)
+```
+
+### 4.3 Correct Patterns
+
+```typescript
+// ✅ CORRECT: Pass plain data
+async function fetchUserStep(userId: string) {
+  "use step";
+  
+  const dbUser = await db.users.findOne({ id: userId });
+  
+  // ✅ Return plain object (no class instance)
+  return {
+    id: dbUser.id,
+    name: dbUser.name,
+    email: dbUser.email,
+    createdAt: dbUser.createdAt  // Date objects are serializable
+  };
+}
+
+// ✅ CORRECT: Pass config, instantiate in step
+async function callExternalAPIStep(config: { apiKey: string, endpoint: string }) {
+  "use step";
+  
+  // Instantiate class INSIDE step
+  const client = new ExternalAPIClient(config.apiKey, config.endpoint);
+  const result = await client.makeRequest();
+  
+  return result;  // Return serializable result
+}
+
+export async function myWorkflow() {
+  "use workflow";
+  
+  const user = await fetchUserStep('user-123');
+  const result = await callExternalAPIStep({ 
+    apiKey: process.env.API_KEY, 
+    endpoint: 'https://api.example.com' 
+  });
+}
+```
+
+### 4.4 Streams: Special Handling
+
+Streams are serializable but CANNOT be read in workflow context.
+
+```typescript
+// ✅ CORRECT: Generate in step, consume in another step
+async function generateStream() {
+  "use step";
+  
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue({ data: 'chunk1' });
+      controller.enqueue({ data: 'chunk2' });
+      controller.close();
+    }
+  });
+}
+
+async function consumeStream(stream: ReadableStream<{ data: string }>) {
+  "use step";
+  
+  const chunks = [];
+  for await (const chunk of stream) {
+    chunks.push(chunk);
+  }
+  return chunks;
+}
+
+export async function streamWorkflow() {
+  "use workflow";
+  
+  // ✅ Pass stream as opaque handle
+  const stream = await generateStream();
+  const data = await consumeStream(stream);
+  
+  return data;
+}
+
+// ❌ WRONG: Reading stream in workflow
+export async function badStreamWorkflow() {
+  "use workflow";
+  
+  const stream = await generateStream();
+  
+  // ❌ NEVER: Stream operations in workflow context
+  const reader = stream.getReader();  // Runtime error!
+  await reader.read();
+}
+```
+
+### 4.5 Request/Response: Convenience Methods
+
+When receiving `Request` or `Response` objects (e.g., from webhooks):
+
+```typescript
+import { createWebhook } from 'workflow';
+
+export async function webhookWorkflow() {
+  "use workflow";
+  
+  const webhook = createWebhook();
+  const request = await webhook;
+  
+  // ✅ CORRECT: Automatically treated as step
+  const body = await request.json();  // Auto-step: cached for replays
+  
+  // Now use body data
+  await processData(body);
+  
+  return body;
+}
+```
+
+---
+
+## 5. ERROR HANDLING: FINE-GRAINED CONTROL
+
+### 5.1 Default Retry Behavior
+
+Steps automatically retry on uncaught errors (default: 3 attempts).
+
+```typescript
+async function apiCallStep() {
+  "use step";
+  
+  const response = await fetch('https://api.example.com/data');
+  
+  // Any uncaught error triggers retry
+  if (!response.ok) {
+    throw new Error('API call failed');  // Will retry up to 3 times
+  }
+  
+  return response.json();
+}
+
+// Customize retry count
+apiCallStep.maxRetries = 5;  // Now retries up to 5 times
+```
+
+### 5.2 FatalError: Stop Retries
+
+Use for unrecoverable errors where retries are futile.
+
+```typescript
+import { FatalError } from 'workflow';
+
+async function validateAndProcessStep(input: string) {
+  "use step";
+  
+  // ✅ Use FatalError for validation failures
+  if (!input || input.length < 5) {
+    throw new FatalError('Invalid input: must be at least 5 characters');
+    // No retries, workflow fails immediately
+  }
+  
+  const response = await fetch(`https://api.example.com/${input}`);
+  
+  // ✅ Use FatalError for 4xx client errors (not server's fault)
+  if (response.status === 404) {
+    throw new FatalError('Resource not found');
+  }
+  
+  if (response.status === 400) {
+    throw new FatalError('Bad request: invalid input format');
+  }
+  
+  if (response.status === 401 || response.status === 403) {
+    throw new FatalError('Authentication/authorization failed');
+  }
+  
+  // Regular errors (5xx server errors) will retry
+  if (response.status >= 500) {
+    throw new Error('Server error, will retry');
+  }
+  
+  return response.json();
+}
+```
+
+**When to use FatalError**:
+- Input validation failures
+- 4xx HTTP errors (client errors)
+- Business logic violations
+- Missing required data
+- Authentication failures
+- Any error where retry won't help
+
+### 5.3 RetryableError: Custom Retry Delay
+
+Use for transient issues requiring specific retry timing (rate limiting, backoff).
+
+```typescript
+import { RetryableError, getStepMetadata } from 'workflow';
+
+async function rateLimitedAPIStep(endpoint: string) {
+  "use step";
+  
+  const metadata = getStepMetadata();
+  const response = await fetch(endpoint);
+  
+  // ✅ Handle rate limiting with custom delay
+  if (response.status === 429) {
+    const retryAfterSeconds = parseInt(response.headers.get('Retry-After') || '60');
+    throw new RetryableError('Rate limited', {
+      retryAfter: retryAfterSeconds  // Seconds to wait
+    });
+  }
+  
+  // ✅ Exponential backoff for server errors
+  if (response.status >= 500) {
+    const backoffSeconds = metadata.attempt ** 2;  // 1s, 4s, 9s, 16s, ...
+    throw new RetryableError('Server error', {
+      retryAfter: backoffSeconds
+    });
+  }
+  
+  return response.json();
+}
+```
+
+### 5.4 Error Handling in Workflows
+
+```typescript
+export async function resilientWorkflow(data: string) {
+  "use workflow";
+  
+  try {
+    const result = await riskyStep(data);
+    return result;
+  } catch (error) {
+    // Errors propagate from steps to workflows
+    // Step has already been retried per its retry policy
+    
+    if (error instanceof FatalError) {
+      // Log fatal error, maybe notify
+      await logErrorStep(error.message);
+      throw error;  // Re-throw to fail workflow
+    }
+    
+    // Other errors: step exhausted retries
+    throw error;
+  }
+}
+```
+
+---
+
+## 6. IDEMPOTENCY: PREVENTING DUPLICATE SIDE EFFECTS
+
+Steps can retry. Retries MUST NOT cause duplicate side effects (double charges, duplicate emails, etc.).
+
+### 6.1 Core Pattern: Use stepId
+
+```typescript
+import { getStepMetadata } from 'workflow';
+
+async function chargeCustomerStep(userId: string, amount: number) {
+  "use step";
+  
+  const { stepId } = getStepMetadata();  // Stable across retries
+  
+  // ✅ CRITICAL: Use stepId as idempotency key
+  await stripe.charges.create({
+    amount: amount,
+    currency: 'usd',
+    customer: userId
+  }, {
+    idempotencyKey: stepId  // Guarantees single charge even with retries
+  });
+}
+```
+
+**Why `stepId` works**:
+- **Stable**: Same ID across all retry attempts
+- **Unique**: Different for each step invocation
+- **Global**: Unique across all workflows
+
+### 6.2 Idempotency Patterns
+
+```typescript
+// Pattern 1: External API with idempotency key
+async function sendEmailStep(to: string, message: string) {
+  "use step";
+  
+  const { stepId } = getStepMetadata();
+  
+  await emailService.send({
+    to: to,
+    subject: 'Notification',
+    body: message,
+    idempotencyKey: stepId  // Prevent duplicate emails
+  });
+}
+
+// Pattern 2: Database upsert with stepId
+async function createRecordStep(data: RecordData) {
+  "use step";
+  
+  const { stepId } = getStepMetadata();
+  
+  // Use upsert pattern
+  await db.records.upsert({
+    where: { idempotencyKey: stepId },
+    create: { ...data, idempotencyKey: stepId },
+    update: { ...data }  // Update if exists (idempotent)
+  });
+}
+
+// Pattern 3: Check-then-act with stepId tracking
+async function processOnceStep(orderId: string) {
+  "use step";
+  
+  const { stepId } = getStepMetadata();
+  
+  // Check if already processed
+  const existing = await db.processedOrders.findOne({
+    where: { stepId: stepId }
+  });
+  
+  if (existing) {
+    return existing.result;  // Already processed, return cached result
+  }
+  
+  // Process
+  const result = await expensiveOperation(orderId);
+  
+  // Mark as processed
+  await db.processedOrders.create({
+    stepId: stepId,
+    orderId: orderId,
+    result: result
+  });
+  
+  return result;
+}
+```
+
+### 6.3 getStepMetadata() Reference
+
+```typescript
+import { getStepMetadata } from 'workflow';
+
+async function exampleStep() {
+  "use step";
+  
+  const metadata = getStepMetadata();
+  
+  // Available properties:
+  metadata.stepId;      // Unique ID, stable across retries (use for idempotency)
+  metadata.attempt;     // Current attempt number (1, 2, 3, ...)
+  
+  // Use attempt for exponential backoff:
+  const backoffSeconds = metadata.attempt ** 2;  // 1s, 4s, 9s, ...
+}
+```
+
+**CRITICAL**: `getStepMetadata()` ONLY works inside step functions called from workflows. Throws error if called outside workflow context or in regular functions.
+
+---
+
+## 7. AI SDK INTEGRATION: DURABLE AI AGENTS
+
+### 7.1 DurableAgent: Production AI Assistants
+
+Use `DurableAgent` from `@workflow/ai` for AI assistants with tool execution as durable steps.
+
+```typescript
+import { DurableAgent } from '@workflow/ai/agent';
+import { z } from 'zod';
+
+// Tools are step functions
+async function getWeatherStep(params: { city: string }) {
+  "use step";
+  
+  const response = await fetch(`https://api.weather.com?city=${params.city}`);
+  return response.json();
+}
+
+async function searchDatabaseStep(params: { query: string }) {
+  "use step";
+  
+  const results = await db.search(params.query);
+  return results;
+}
+
+export async function aiAgentWorkflow(userMessage: string) {
+  "use workflow";
+  
+  const agent = new DurableAgent({
+    model: 'openai/gpt-4o',
+    system: 'You are a helpful assistant with access to weather and database.',
+    tools: {
+      getWeather: {
+        description: 'Get current weather for a city',
+        inputSchema: z.object({ city: z.string() }),
+        execute: getWeatherStep  // Step function = durable + retryable
+      },
+      searchDatabase: {
+        description: 'Search the database',
+        inputSchema: z.object({ query: z.string() }),
+        execute: searchDatabaseStep  // Step function = durable + retryable
+      }
+    }
+  });
+  
+  await agent.stream({
+    messages: [{ role: 'user', content: userMessage }]
+  });
+}
+```
+
+**Key Points**:
+- Tool `execute` functions are step functions (with `"use step"`)
+- Tool calls automatically durable and retryable
+- Tools inherit workflow durability guarantees
+
+### 7.2 Tools with Workflow Primitives
+
+Tools can use workflow primitives like `sleep()` and hooks (NO `"use step"` needed).
+
+```typescript
+import { sleep, defineHook } from 'workflow';
+import { z } from 'zod';
+
+const approvalHook = defineHook<{ approved: boolean; reason: string }>();
+
+// Tool using sleep() - no "use step" directive
+async function scheduleTaskTool(params: { delaySeconds: number }) {
+  await sleep(`${params.delaySeconds}s`);  // Workflow primitive
+  return `Waited ${params.delaySeconds} seconds`;
+}
+
+// Tool using hooks - no "use step" directive
+async function requestApprovalTool(params: { message: string }) {
+  const hook = approvalHook.create({ 
+    metadata: { message: params.message } 
+  });
+  
+  console.log(`Approval needed. Token: ${hook.token}`);
+  
+  const approval = await hook;  // Workflow suspends here
+  
+  if (approval.approved) {
+    return `Approved: ${approval.reason}`;
+  } else {
+    throw new Error(`Denied: ${approval.reason}`);
+  }
+}
+
+export async function advancedAgentWorkflow(userRequest: string) {
+  "use workflow";
+  
+  const agent = new DurableAgent({
+    model: 'openai/gpt-4o',
+    tools: {
+      scheduleTask: {
+        description: 'Pause for specified seconds',
+        inputSchema: z.object({ delaySeconds: z.number() }),
+        execute: scheduleTaskTool  // No "use step" - uses workflow primitive
+      },
+      requestApproval: {
+        description: 'Request human approval',
+        inputSchema: z.object({ message: z.string() }),
+        execute: requestApprovalTool  // No "use step" - uses workflow hooks
+      }
+    }
+  });
+  
+  await agent.stream({
+    messages: [{ role: 'user', content: userRequest }]
+  });
+}
+```
+
+**Rule**: Tools that use ONLY workflow primitives (`sleep`, hooks, webhooks) DON'T need `"use step"`. Tools that perform side effects (API calls, database, etc.) MUST use `"use step"`.
+
+---
+
+## 8. STARTING WORKFLOWS: API ROUTES
+
+Workflows MUST be started from server contexts using `start()` from `workflow/api`.
+
+### 8.1 Non-Blocking Execution (Preferred)
+
+```typescript
+// FILE: app/api/workflow/process-order/route.ts
+import { NextResponse } from 'next/server';
+import { start } from 'workflow/api';
+import { processOrderWorkflow } from '@/workflows/billing/process-order';
+
+export async function POST(request: Request) {
+  const { orderId } = await request.json();
+  
+  // ✅ CORRECT: Start workflow (non-blocking)
+  const run = await start(processOrderWorkflow, [orderId]);
+  
+  // start() returns immediately
+  // Workflow executes asynchronously in background
+  
+  return NextResponse.json({
+    runId: run.runId,  // Use for tracking
+    status: 'started'
+  });
+}
+```
+
+**Why Preferred**:
+- Returns immediately (low latency)
+- No timeout issues
+- Workflow runs in background
+- Can poll for status using `runId`
+
+### 8.2 Blocking Execution (Use Sparingly)
+
+```typescript
+import { execute } from 'workflow/api';
+
+export async function POST(request: Request) {
+  const { orderId } = await request.json();
+  
+  // ⚠️ Blocking - waits for completion
+  const result = await execute(processOrderWorkflow, [orderId]);
+  
+  return NextResponse.json(result);
+}
+```
+
+**⚠️ WARNING**: `execute()` can timeout on long-running workflows. Only use for workflows that complete in < 10 seconds. Prefer `start()` + status polling.
+
+### 8.3 Streaming Chat with Workflows
+
+For AI chat with streaming:
+
+```typescript
+// FILE: app/api/chat/route.ts
+import { start } from 'workflow/api';
+import { chatWorkflow } from '@/workflows/chat';
+
+export async function POST(request: Request) {
+  const { message } = await request.json();
+  
+  const run = await start(chatWorkflow, [message]);
+  
+  // ✅ CRITICAL: Return runId in header for client reconnection
+  return new Response(run.readable, {
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'x-workflow-run-id': run.runId  // Required for reconnection
+    }
+  });
+}
+```
+
+### 8.4 Client Reconnection Endpoint
+
+```typescript
+// FILE: app/api/chat/[id]/stream/route.ts
+import { getRun } from 'workflow/api';
+
+export async function GET(
+  request: Request,
+  { params }: { params: { id: string } }
+) {
+  const { searchParams } = new URL(request.url);
+  const startIndex = parseInt(searchParams.get('startIndex') || '0');
+  
+  // Get existing workflow run
+  const run = await getRun(params.id);
+  
+  if (!run) {
+    return new Response('Run not found', { status: 404 });
+  }
+  
+  // Resume stream from specific chunk
+  const readable = run.readable.slice(startIndex);
+  
+  return new Response(readable, {
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'x-workflow-run-id': run.runId
+    }
+  });
+}
+```
+
+### 8.5 Prohibited: Direct Workflow Calls
+
+```typescript
+// ❌ WRONG: Calling workflow directly
+export async function POST(request: Request) {
+  const { orderId } = await request.json();
+  
+  // ❌ DO NOT: Direct call won't work
+  const result = await processOrderWorkflow(orderId);  // FAILS
+  
+  return NextResponse.json(result);
+}
+
+// ✅ CORRECT: Use start()
+export async function POST(request: Request) {
+  const { orderId } = await request.json();
+  
+  const run = await start(processOrderWorkflow, [orderId]);
+  
+  return NextResponse.json({ runId: run.runId });
+}
+```
+
+---
+
+## 9. CONTROL FLOW: NATIVE JAVASCRIPT
+
+Workflows support standard JavaScript control flow patterns.
+
+### 9.1 Sequential Execution
+
+```typescript
+export async function sequentialWorkflow(input: string) {
+  "use workflow";
+  globalThis.fetch = fetch;  // For AI SDK
+  
+  // Steps execute one after another
+  const result1 = await step1(input);
+  const result2 = await step2(result1);
+  const result3 = await step3(result2);
+  
+  return result3;
+}
+```
+
+### 9.2 Parallel Execution
+
+```typescript
+export async function parallelWorkflow(userId: string) {
+  "use workflow";
+  
+  // ✅ CORRECT: Promise.all for parallel execution
+  const [user, orders, payments] = await Promise.all([
+    fetchUser(userId),      // These 3 steps run
+    fetchOrders(userId),    // in parallel
+    fetchPayments(userId)
+  ]);
+  
+  // All 3 complete before continuing
+  return { user, orders, payments };
+}
+```
+
+**Key Point**: Each step in `Promise.all()` is independently tracked, cached, and retried.
+
+### 9.3 Conditional Execution
+
+```typescript
+export async function conditionalWorkflow(data: string) {
+  "use workflow";
+  globalThis.fetch = fetch;
+  
+  const classification = await classifyData(data);
+  
+  // ✅ Use conditionals based on step results
+  if (classification.type === 'urgent') {
+    await sendUrgentAlert(data);
+  } else if (classification.type === 'normal') {
+    await queueForProcessing(data);
+  } else {
+    await archiveData(data);
+  }
+  
+  return classification;
+}
+```
+
+### 9.4 Loops with Iteration Limits
+
+**MANDATORY**: ALL loops MUST have maximum iteration limits.
+
+```typescript
+export async function iterativeWorkflow(text: string) {
+  "use workflow";
+  globalThis.fetch = fetch;
+  
+  let currentText = text;
+  let iterations = 0;
+  const MAX_ITERATIONS = 3;  // ✅ MANDATORY: Always set limit
+  
+  while (iterations < MAX_ITERATIONS) {
+    const evaluation = await evaluateQuality(currentText);
+    
+    if (evaluation.meetsThreshold) {
+      break;  // Exit early on success
+    }
+    
+    currentText = await improveText(currentText);
+    iterations++;
+  }
+  
+  return currentText;
+}
+```
+
+❌ **PROHIBITED**: Infinite loops
+
+```typescript
+// ❌ WRONG: No iteration limit
+export async function badLoopWorkflow() {
+  "use workflow";
+  
+  while (true) {  // NEVER DO THIS - infinite loop
+    await someStep();
+  }
+}
+
+// ❌ WRONG: Condition that might never be true
+let done = false;
+while (!done) {  // DANGEROUS - no guarantee it exits
+  await someStep();
+}
+```
+
+### 9.5 Race Conditions (Timeouts)
+
+```typescript
+import { sleep } from 'workflow';
+
+export async function timeoutWorkflow() {
+  "use workflow";
+  
+  // ✅ Use Promise.race for timeout patterns
+  try {
+    const result = await Promise.race([
+      fetchDataStep(),
+      sleep('30s').then(() => { 
+        throw new Error('Timeout: operation took > 30s'); 
+      })
+    ]);
+    
+    return result;
+  } catch (error) {
+    if (error.message.includes('Timeout')) {
+      await logTimeoutStep();
+      throw error;
+    }
+    throw error;
+  }
+}
+```
+
+---
+
+## 10. SUSPENSION: SLEEP, HOOKS, WEBHOOKS
+
+Workflows can suspend without consuming resources.
+
+### 10.1 sleep(): Resource-Free Delays
+
+```typescript
+import { sleep } from 'workflow';
+
+export async function scheduledWorkflow() {
+  "use workflow";
+  
+  await sendReminder();
+  
+  // ✅ Sleep suspends workflow, no resource consumption
+  await sleep('1 day');   // String formats
+  await sleep('2 hours');
+  await sleep('30 minutes');
+  await sleep('45s');
+  await sleep(3600);      // Or seconds as number
+  
+  await sendFollowUp();
+}
+```
+
+**Supported Formats**:
+- Strings: `'1 day'`, `'2 hours'`, `'30 minutes'`, `'45s'`
+- Numbers: seconds as integer
+
+**Zero Cost**: While sleeping, workflow uses NO compute resources. Wakes up automatically when time elapsed.
+
+### 10.2 createHook(): Human-in-the-Loop
+
+```typescript
+import { defineHook, createHook } from 'workflow';
+import { resumeHook } from 'workflow/api';
+
+// Define typed hook
+const approvalHook = defineHook<{ approved: boolean; reason: string }>();
+
+export async function approvalWorkflow(documentId: string) {
+  "use workflow";
+  
+  const document = await fetchDocument(documentId);
+  
+  // Create hook - workflow suspends here
+  const hook = approvalHook.create({
+    metadata: { documentId }
+  });
+  
+  // Hook token for external resumption
+  console.log(`Approval required. Token: ${hook.token}`);
+  
+  // Send notification with token
+  await sendApprovalEmail(document.owner, hook.token);
+  
+  // ⏸️ WORKFLOW SUSPENDS HERE until hook is resumed
+  const approval = await hook;
+  
+  if (approval.approved) {
+    await publishDocument(documentId);
+  }
+  
+  return approval;
+}
+
+// Resume endpoint (API route)
+// FILE: app/api/approve/route.ts
+export async function POST(request: Request) {
+  const { token, approved, reason } = await request.json();
+  
+  // Resume workflow with data
+  await resumeHook(token, { approved, reason });
+  
+  return NextResponse.json({ success: true });
+}
+```
+
+**Key Points**:
+- Workflow suspends at `await hook`
+- Resume with `resumeHook(token, data)`
+- Data must match hook type
+- Workflow state preserved during suspension
+
+### 10.3 createWebhook(): External System Integration
+
+```typescript
+import { createWebhook } from 'workflow';
+
+export async function webhookWorkflow() {
+  "use workflow";
+  
+  // Create webhook - returns unique URL
+  const webhook = createWebhook();
+  
+  console.log(`Webhook URL: ${webhook.url}`);
+  
+  // Send URL to external system
+  await notifyExternalSystem(webhook.url);
+  
+  // ⏸️ WORKFLOW SUSPENDS until webhook receives POST request
+  const request = await webhook;
+  
+  // Process webhook payload
+  const body = await request.json();  // Auto-step
+  
+  await processWebhookData(body);
+  
+  return body;
+}
+```
+
+### 10.4 Webhooks with Manual Response Control
+
+```typescript
+import { createWebhook } from 'workflow';
+
+export async function webhookWithManualResponseWorkflow() {
+  "use workflow";
+  
+  const webhook = createWebhook({
+    respondWith: 'manual'  // Take manual control of HTTP response
+  });
+  
+  await notifyExternalSystem(webhook.url);
+  
+  const request = await webhook;
+  
+  try {
+    const body = await request.json();
+    
+    // Validate payload
+    if (!body.signature || !validateSignature(body.signature)) {
+      // ✅ Send 400 response
+      await request.respondWith(
+        new Response('Invalid signature', { status: 400 })
+      );
+      throw new Error('Invalid webhook signature');
+    }
+    
+    // Process valid webhook
+    await processWebhookData(body);
+    
+    // ✅ Send 200 success response
+    await request.respondWith(
+      new Response(JSON.stringify({ success: true }), { 
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      })
+    );
+    
+    return body;
+  } catch (error) {
+    // ✅ CRITICAL: Always respond on ALL code paths
+    await request.respondWith(
+      new Response('Internal error', { status: 500 })
+    );
+    throw error;
+  }
+}
+```
+
+**CRITICAL**: When using `respondWith: 'manual'`, you MUST call `request.respondWith()` on ALL code paths (success and error). Otherwise, the HTTP request hangs indefinitely.
+
+---
+
+## 11. PROJECT STRUCTURE: RECOMMENDED ORGANIZATION
+
+```
+workflows/
+├── user-onboarding/
+│   ├── index.ts           # Workflow functions (exports workflows)
+│   └── steps.ts           # Step functions
+├── order-processing/
+│   ├── index.ts           # Workflow function
+│   └── steps/
+│       ├── payment.ts     # Payment-related steps
+│       ├── inventory.ts   # Inventory-related steps
+│       └── notification.ts
+└── shared/
+    ├── validation.ts      # Reusable validation steps
+    └── notifications.ts   # Reusable notification steps
+```
+
+**Principles**:
+- Workflows export from `index.ts`
+- Steps in `steps.ts` (simple) or `steps/` directory (complex)
+- Shared steps in `shared/` directory
+- Separation improves bundler reliability
+
+**Note**: Official docs say "Splitting up steps and workflows will also help avoid most bundler related bugs" - referring to separating STEPS from WORKFLOWS, not about monolithic workflow files.
+
+---
+
+## 12. OBSERVABILITY & DEBUGGING
+
+### 12.1 Console Logging
+
+```typescript
+export async function observableWorkflow(data: string) {
+  "use workflow";
+  
+  // ✅ Console logs are captured and persisted
+  console.log('[Workflow Started]', { data });
+  
+  const result1 = await step1(data);
+  console.log('[Step 1 Complete]', { result1 });
+  
+  const result2 = await step2(result1);
+  console.log('[Step 2 Complete]', { result2 });
+  
+  console.log('[Workflow Complete]');
+  return result2;
+}
+```
+
+**Key Points**:
+- All console logs captured
+- Logs persisted with workflow run
+- Available in observability UI
+- Use structured data for better debugging
+
+### 12.2 Run Tracking
+
+```typescript
+// When starting workflow
+import { start, getRun } from 'workflow/api';
+
+const run = await start(myWorkflow, [input]);
+console.log(`Started workflow: ${run.runId}`);
+
+// Later, retrieve run status
+const run = await getRun(runId);
+if (run) {
+  console.log(`Run status: ${run.status}`);
+  console.log(`Run result:`, await run.result);
+}
+```
+
+---
+
+## 13. DEPLOYMENT: WORLDS
+
+**"World"** = abstraction layer for storage, queuing, and authentication.
+
+### 13.1 Vercel World (Production)
+
+For Vercel deployments, Vercel World is automatic and fully managed.
+
+```typescript
+// next.config.ts
+import { withWorkflow } from 'workflow/next';
+
+export default withWorkflow(nextConfig);
+// Vercel World is automatic on Vercel (zero config)
+```
+
+### 13.2 Local Development
+
+Workflows run locally with in-memory storage during development.
+
+```bash
+pnpm dev
+# Workflows execute locally with in-memory "world"
+```
+
+**No configuration needed** for local development.
+
+---
+
+## 14. COMMON ANTI-PATTERNS: PROHIBITED
+
+### ❌ 1. Missing Directives
+
+```typescript
+// ❌ WRONG: Missing "use workflow"
+export async function badWorkflow() {
+  // Not a workflow - just a regular async function
+  await someStep();  // Won't work as expected
+}
+```
+
+### ❌ 2. Side Effects in Workflows
+
+```typescript
+// ❌ WRONG: Database access in workflow
+export async function badWorkflow() {
+  "use workflow";
+  
+  const db = drizzle(process.env.DATABASE_URL);
+  const data = await db.query.users.findFirst();  // PROHIBITED
+}
+```
+
+### ❌ 3. Forgetting globalThis.fetch Override
+
+```typescript
+// ❌ WRONG: AI SDK without fetch override
+export async function badAIWorkflow() {
+  "use workflow";
+  
+  // Missing: globalThis.fetch = fetch
+  const { text } = await generateText({ model, prompt });
+  // AI call NOT tracked - durability lost!
+}
+```
+
+### ❌ 4. Non-Idempotent Steps
+
+```typescript
+// ❌ WRONG: No idempotency protection
+async function chargeUserStep(userId: string, amount: number) {
+  "use step";
+  
+  // Retries will charge multiple times!
+  await stripe.charges.create({
+    amount: amount,
+    currency: 'usd',
+    customer: userId
+  });
+  // Missing: idempotencyKey: stepId
+}
+```
+
+### ❌ 5. Calling Workflows Directly
+
+```typescript
+// ❌ WRONG: Direct workflow call
+export async function POST(request: Request) {
+  const result = await myWorkflow(input);  // FAILS
+}
+
+// ✅ CORRECT: Use start()
+export async function POST(request: Request) {
+  const run = await start(myWorkflow, [input]);
+  return NextResponse.json({ runId: run.runId });
+}
+```
+
+### ❌ 6. Infinite Loops
+
+```typescript
+// ❌ WRONG: No iteration limit
+export async function badLoop() {
+  "use workflow";
+  
+  while (true) {  // DANGEROUS
+    await someStep();
+  }
+}
+```
+
+### ❌ 7. Missing withWorkflow() Wrapper
+
+```typescript
+// ❌ WRONG: next.config.ts without wrapper
+export default nextConfig;  // Workflows won't work
+
+// ✅ CORRECT
+export default withWorkflow(nextConfig);
+```
+
+### ❌ 8. Passing Non-Serializable Data
+
+```typescript
+// ❌ WRONG: Passing function
+export async function badWorkflow() {
+  "use workflow";
+  
+  const fn = () => console.log('test');
+  await processStep(fn);  // FAILS - functions not serializable
+}
+
+// ❌ WRONG: Passing class instance
+export async function badWorkflow() {
+  "use workflow";
+  
+  const client = new APIClient(apiKey);
+  await processStep(client);  // FAILS - instances not serializable
+}
+```
+
+---
+
+## 15. RESEARCH-FIRST PROTOCOL
+
+When implementing workflows, ALWAYS follow this sequence:
+
+1. **Read Existing Code**: Use `grep` or `codebase_search` to find existing workflows/steps
+2. **Identify Reusable Components**: Check `workflows/shared/` for reusable steps
+3. **Plan Architecture**: Determine workflow vs step boundaries BEFORE writing code
+4. **Validate Directives**: Ensure `"use workflow"` and `"use step"` are present
+5. **Check Configuration**: Verify `withWorkflow()` in `next.config.ts`
+6. **Implement Idempotency**: Use `getStepMetadata().stepId` for side effects
+7. **Test Serialization**: Ensure all data is serializable
+8. **Add Observability**: Include console.log statements
+
+---
+
+## 16. PRE-DEPLOYMENT CHECKLIST
+
+Before committing workflow code, verify:
+
+- [ ] `"use workflow"` directive present in all workflow functions
+- [ ] `"use step"` directive present in all step functions
+- [ ] `withWorkflow()` wraps `next.config.ts`
+- [ ] `globalThis.fetch = fetch` when using AI SDK
+- [ ] All data is serializable (no class instances, functions, etc.)
+- [ ] Steps are idempotent (use `stepId` for side effects with external APIs)
+- [ ] Error handling uses `FatalError` and `RetryableError` appropriately
+- [ ] Iteration loops have `MAX_ITERATIONS` limit
+- [ ] Console logs for observability
+- [ ] Workflows started with `start()`, NOT direct calls
+- [ ] API routes return `runId` for tracking
+- [ ] Webhooks with `respondWith: 'manual'` always call `request.respondWith()`
+- [ ] No infinite loops or conditions that might not terminate
+
+---
+
+## 17. CORE API IMPORTS REFERENCE
+
+```typescript
+// Workflow primitives
+import { 
+  fetch,                  // HTTP requests as durable steps
+  sleep,                  // Resource-free delays
+  createHook,             // Human-in-the-loop suspension
+  defineHook,             // Type-safe hook definitions
+  createWebhook,          // External system integration
+  getStepMetadata,        // Step ID and retry info (steps only)
+  getWorkflowMetadata,    // Workflow metadata (workflows only)
+  getWritable,            // Stream data from workflow to client
+  FatalError,             // Unrecoverable errors (stop retries)
+  RetryableError          // Transient errors (custom retry delays)
+} from 'workflow';
+
+// Runtime API (for API routes/server code)
+import { 
+  start,                  // Start workflows (non-blocking)
+  execute,                // Execute workflows (blocking)
+  getRun,                 // Retrieve run status and result
+  resumeHook,             // Resume hooks externally
+  resumeWebhook           // Resume webhooks externally
+} from 'workflow/api';
+
+// Next.js integration
+import { withWorkflow } from 'workflow/next';
+
+// AI integration
+import { 
+  DurableAgent,           // AI agents with durable tool execution
+  WorkflowChatTransport   // Chat streaming transport for client
+} from '@workflow/ai';
+```
+
+---
+
+## 18. FINAL RULES SUMMARY
+
+**NEVER FORGET**:
+
+1. **Directives are MANDATORY**: `"use workflow"` and `"use step"` as first statements
+2. **Configuration is MANDATORY**: `withWorkflow()` in `next.config.ts`
+3. **Separation is ABSOLUTE**: Workflows orchestrate, steps execute. NO side effects in workflows
+4. **Serialization is NON-NEGOTIABLE**: Only serializable data crosses boundaries
+5. **Idempotency is CRITICAL**: Use `stepId` for ALL side effects with external APIs
+6. **AI SDK requires fetch override**: `globalThis.fetch = fetch` BEFORE AI calls
+7. **Start with start()**: NEVER call workflows directly
+8. **Loops MUST have limits**: Always set `MAX_ITERATIONS`
+9. **Errors need semantics**: Use `FatalError` (stop retries) and `RetryableError` (custom delay)
+10. **Observability is built-in**: Use console.log liberally
+
+These rules are ABSOLUTE. Violations cause runtime failures, non-deterministic behavior, or data corruption.
+
+---
+
+## 19. PROJECT-SPECIFIC NOTES
+
+This project (`billing-reconciliation`) uses:
+- **Version**: `workflow@4.0.1-beta.11` (latest, stable beta)
+- **Framework**: Next.js 16.0.0
+- **Auth**: Clerk v6
+- **Database**: PostgreSQL with Drizzle ORM
+
+**Legacy Guidance No Longer Applicable**:
+- ❌ File-level directives: NOT in official docs, likely project-specific workaround
+- ❌ Monolithic workflow files: Example-specific advice, NOT official guidance
+- ❌ Beta version warnings: This project already on latest beta (4.0.1-beta.11)
+
+**Trust Official Documentation**: The rules in sections 0-18 are from OFFICIAL Workflow DevKit documentation and verified examples. Ignore conflicting advice from example READMEs or project-specific workarounds unless experiencing specific issues.
